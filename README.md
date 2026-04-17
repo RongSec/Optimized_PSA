@@ -1,6 +1,7 @@
 # Optimized_PSA
 
 这是一个基于lnng师傅二开的被动扫描助手
+插件ID：75379955-c709-4948-a8ee-f2adafbcc540
 
 ## WHY?
 
