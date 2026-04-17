@@ -1,0 +1,314 @@
+# HTTP方法提取函数  
+get_http_method = func(request_data) {  
+    lines = str.SplitAndTrim(request_data, "\r\n")  
+    request_line = lines[0]  
+    method = str.SplitAndTrim(request_line, " ")[0]  
+    return method  
+}  
+
+# 通配符转正则表达式  
+wildcard_to_regex = func(pattern) {  
+    patternX = `\*`  
+    newStr = `[a-zA-Z0-9-]*`  
+    pattern = re.ReplaceAll(pattern, patternX, newStr)  
+    return "^" + pattern + "$"  
+}  
+
+# 优化的主机匹配函数，支持精确的端口匹配  
+host_matches_with_port = func(targetUrl, pattern) {  
+    targetHost, targetPort, err = str.ParseStringToHostPort(targetUrl)  
+    if err != nil {  
+        return false  
+    }  
+      
+    target = targetHost  
+    if targetPort > 0 {  
+        target = sprintf("%s:%d", targetHost, targetPort)  
+    }  
+      
+    if str.Contains(pattern, "*") {  
+        return str.MatchAllOfRegexp(targetHost, wildcard_to_regex(pattern))  
+    } else if str.Contains(pattern, ":") {  
+        return target == pattern  
+    } else {  
+        return targetHost == pattern  
+    }  
+}  
+
+# 检查路径是否匹配模式  
+path_matches = func(path, pattern) {  
+    if str.Contains(pattern, "*") {  
+        return str.MatchAllOfRegexp(path, wildcard_to_regex(pattern))  
+    } else {  
+        return str.HasPrefix(path, pattern)  
+    }  
+}  
+
+# 参数1(必须):被动扫描器地址列表，支持多个地址  
+passiveScanning = cli.Text(  
+    "passiveScanning",   
+    cli.setHelp("填写规则:http://127.0.0.1:8080\nhttp://127.0.0.1:8081 支持多个地址按行分隔"),  
+    cli.setRequired(true),  
+    cli.setVerboseName("被动扫描器地址列表"),  
+)  
+
+# 参数2:仅发送白名单主机  
+whitelisthostcli = cli.Text(  
+    "whitelisthostcli",   
+    cli.setHelp("仅发送命中白名单主机的流量,支持*.yaklang.com 10.10.10.* 127.0.0.1:8080精确端口匹配"),  
+    cli.setDefault(""),  
+    cli.setVerboseName("白名单主机列表"),  
+)  
+
+# 参数3:不发送黑名单主机  
+blacklistcli = cli.Text(  
+    "blacklistcli",   
+    cli.setHelp("不发送命中黑名单主机的流量,支持*.gov.cn *.edu.cn 127.0.0.1:8080精确端口匹配"),  
+    cli.setDefault("*.gov.cn\n*.edu.cn"),  
+    cli.setVerboseName("黑名单主机列表"),  
+)  
+
+# 参数4:白名单路径  
+whitelistpathcli = cli.Text(  
+    "whitelistpathcli",   
+    cli.setHelp("仅发送命中白名单路径的流量,支持/api/* /admin/*通配，每行一个"),  
+    cli.setDefault(""),  
+    cli.setVerboseName("白名单路径列表"),  
+)  
+
+# 参数5:黑名单路径  
+blacklistpathcli = cli.Text(  
+    "blacklistpathcli",   
+    cli.setHelp("不发送命中黑名单路径的流量,支持/static/* /images/*通配，每行一个"),  
+    cli.setDefault(""),  
+    cli.setVerboseName("白名单路径列表"),  
+)  
+
+# 参数6:不发送后缀黑名单  
+disableSuffixscli = cli.Text(  
+    "disableSuffixscli",   
+    cli.setDefault(".css\n.jpg\n.jpeg\n.png\n.gif\n.wmv\n.a3c\n.ace\n.aif\n.aifc\n.aiff\n.arj\n.asf\n.asx\n.attach\n.au\n.avi\n.bin\n.bmp\n.cab\n.cache\n.class\n.djv\n.djvu\n.dwg\n.es\n.esl\n.exe\n.fif\n.fvi\n.gz\n.hqx\n.ice\n.ico\n.ief\n.ifs\n.iso\n.jar\n.jpe\n.kar\n.mdb\n.mid\n.midi\n.mov\n.movie\n.mp\n.mp2\n.mp3\n.mp4\n.mpeg\n.mpeg2\n.mpg\n.mpg2\n.mpga\n.msi\n.pac\n.pdf\n.ppt\n.psd\n.qt\n.ra\n.ram\n.rar\n.rm\n.rpm\n.snd\n.svf\n.tar\n.tgz\n.tif\n.tiff\n.tpl\n.ttf\n.uff\n.wav\n.wma\n.zip\n.woff\n.woff2\n.apk"),  
+    cli.setVerboseName("禁用后缀黑名单"),  
+)  
+
+# 参数7:不发送方法黑名单  
+blackmethodcli = cli.StringSlice(  
+    "blackmethodcli",   
+    cli.setMultipleSelect(true),  
+    cli.setSelectOption("GET", "GET"),  
+    cli.setSelectOption("POST", "POST"),  
+    cli.setSelectOption("DELETE", "DELETE"),  
+    cli.setSelectOption("PUT", "PUT"),  
+    cli.setSelectOption("OPTIONS", "OPTIONS"),  
+    cli.setSelectOption("TRACE", "TRACE"),  
+    cli.setSelectOption("COPY", "COPY"),  
+    cli.setVerboseName("禁用方法"),  
+)  
+
+useMITMRule = cli.Bool(
+    "mitmrule", 
+    cli.setVerboseName("开启mitm规则"),
+    cli.setHelp("使用mitm规则对代理的流量进行染色和提取数据的操作")
+)
+
+# ========== 新增去重相关参数 ==========
+dedupMode = cli.String(
+    "dedupMode",
+    cli.setVerboseName("去重模式"),
+    cli.setHelp("none: 不去重; full: 对整个请求包去重; method_url: 对方法+URL去重"),
+    cli.setDefault("full"),
+    cli.setMultipleSelect(false),
+    cli.setSelectOption("none", "不去重"),
+    cli.setSelectOption("full", "整个请求包去重"),
+    cli.setSelectOption("method_url", "方法+URL去重"),
+)
+
+dedupCacheSize = cli.Int(
+    "dedupCacheSize",
+    cli.setVerboseName("去重缓存大小"),
+    cli.setHelp("记录已处理请求的最大数量，超出后自动淘汰最早的记录"),
+    cli.setDefault(10000),
+)
+
+cli.check()  
+
+# 修正缓存大小下限（用户可能输入0或负数）
+if dedupCacheSize < 1 {
+    dedupCacheSize = 10000
+}
+
+# 全局变量  
+passiveScanners = []  
+
+# 初始化逻辑，使用按行分隔  
+if passiveScanning != "" {  
+    scannerList = str.ParseStringToLines(passiveScanning)  
+    for scanner in scannerList {  
+        scanner = str.TrimSpace(scanner)  
+        if scanner != "" {  
+            passiveScanners = append(passiveScanners, scanner)  
+        }  
+    }  
+}  
+
+# ========== 去重相关全局变量 ==========
+var dedupMutex = sync.NewMutex()
+var dedupCache = make(map[string]bool)
+var dedupQueue = make([]string, 0)
+
+# 计算请求包的指纹（根据用户选择的模式）
+calc_fingerprint = func(reqBytes, mode) {
+    if mode == "full" {
+        return codec.Md5(reqBytes)
+    } else if mode == "method_url" {
+        # 解析请求行，获取方法 + 原始URL
+        reqStr = string(reqBytes)
+        lines = str.SplitAndTrim(reqStr, "\r\n")
+        if len(lines) == 0 {
+            return ""
+        }
+        requestLine = lines[0]
+        parts = str.SplitAndTrim(requestLine, " ")
+        if len(parts) < 2 {
+            return ""
+        }
+        method = parts[0]
+        rawUrl = parts[1]
+        fingerprintStr = sprintf("%s %s", method, rawUrl)
+        return codec.Md5(fingerprintStr)
+    }
+    return ""
+}
+
+# 检查并记录去重，返回true表示重复（已存在），false表示新请求需要发送
+check_and_record = func(fingerprint) {
+    if fingerprint == "" {
+        return false   # 指纹无效，当作新请求
+    }
+    dedupMutex.Lock()
+    defer dedupMutex.Unlock()
+    
+    # 检查是否已存在
+    if dedupCache[fingerprint] {
+        return true
+    }
+    
+    # 记录新指纹
+    dedupCache[fingerprint] = true
+    dedupQueue = append(dedupQueue, fingerprint)
+    
+    # 超出缓存大小限制，淘汰最早的
+    if len(dedupQueue) > dedupCacheSize {
+        oldestFp = dedupQueue[0]
+        delete(dedupCache, oldestFp)
+        dedupQueue = dedupQueue[1:]
+    }
+    return false
+}
+
+# 发送到所有扫描器  
+send_to_all_scanners = func(isHttps, req) {  
+    if len(passiveScanners) == 0 {  
+        return  
+    }  
+      
+    for scanner in passiveScanners {  
+        if scanner != "" {  
+            poc.HTTP(req, poc.https(isHttps), poc.proxy(scanner), poc.timeout(5), poc.useMitmRule(useMITMRule))  
+        }  
+    }  
+}  
+
+mirrorHTTPFlow = func(isHttps /* bool */, url /* string */, req /* []byte */, rsp /* []byte */, body /* []byte */) {  
+    method = get_http_method(string(req))  
+  
+    # 1. 检查HTTP方法黑名单  
+    if len(blackmethodcli) != 0 {  
+        for blackmethod in blackmethodcli {  
+            if method == blackmethod {  
+                return  
+            }  
+        }  
+    }  
+      
+    if disableSuffixscli != "" {  
+        disableSuffixs = str.ParseStringToLines(disableSuffixscli)  
+        for disableSuffix in disableSuffixs {  
+            if str.EndsWith(url, disableSuffix) {  
+                return  
+            }  
+        }  
+    }  
+      
+    # 解析URL获取路径  
+    parsedUrl, err = str.ParseStringUrlToUrlInstance(url)  
+    if err != nil {  
+        return  
+    }  
+    path = parsedUrl.Path  
+  
+    # 3. 检查主机黑名单（使用优化的端口匹配）  
+    if blacklistcli != "" {  
+        blacklist = str.ParseStringToLines(blacklistcli)  
+        for blackhost in blacklist {  
+            if host_matches_with_port(url, blackhost) {  
+                return  
+            }  
+        }  
+    }  
+      
+    if blacklistpathcli != "" {  
+        blacklistpaths = str.ParseStringToLines(blacklistpathcli)  
+        for blackpath in blacklistpaths {  
+            if path_matches(path, blackpath) {  
+                return  
+            }  
+        }  
+    }  
+      
+    hostWhitelisted = false  
+    if whitelisthostcli != "" {  
+        whitelist = str.ParseStringToLines(whitelisthostcli)  
+        for whitehost in whitelist {  
+            if host_matches_with_port(url, whitehost) {  
+                hostWhitelisted = true  
+                break  
+            }  
+        }  
+          
+        if !hostWhitelisted {  
+            return  
+        }  
+    } else {  
+        hostWhitelisted = true  
+    }  
+      
+    pathWhitelisted = false  
+    if whitelistpathcli != "" {  
+        whitelistpaths = str.ParseStringToLines(whitelistpathcli)  
+        for whitepath in whitelistpaths {  
+            if path_matches(path, whitepath) {  
+                pathWhitelisted = true  
+                break  
+            }  
+        }  
+          
+        if !pathWhitelisted {  
+            return  
+        }  
+    } else {  
+        pathWhitelisted = true  
+    }  
+      
+    if hostWhitelisted && pathWhitelisted {  
+        # ========== 去重处理 ==========
+        if dedupMode != "none" {
+            # 直接使用返回值调用，避免中间变量
+            if check_and_record(calc_fingerprint(req, dedupMode)) {
+                return
+            }
+        }
+        # 转发到所有扫描器
+        send_to_all_scanners(isHttps, req)  
+    }  
+}
